@@ -1,22 +1,22 @@
 import argparse
-import torch
-import torch.nn as nn
 import os
 import time 
+
+from tensorboardX import SummaryWriter
+import torch
+from torch_ema import ExponentialMovingAverage
+
+import sys; sys.path.append("..")
+from sam import SAM
 from model.wide_res_net import WideResNet
 from model.smooth_cross_entropy import smooth_crossentropy
 from data.cifar import Cifar
+from utility.trades import AT_TRAIN, AT_VAL, AT_TRAIN_adamsam
 from utility.log import Log
 from utility.initialize import initialize
 from utility.step_lr import StepLR
 from utility.bypass_bn import enable_running_stats, disable_running_stats
-from utility.meters import get_meters,Meter,ScalarMeter,flush_scalar_meters
-#from utility.ema import ExponentialMovingAverage
-from torch_ema import ExponentialMovingAverage
-import sys; sys.path.append("..")
-from sam import SAM
-from utility.trades import AT_TRAIN, l2_norm,squared_l2_norm, AT_VAL, AT_TRAIN_adamsam
-from tensorboardX import SummaryWriter
+from utility.meters import get_meters, ScalarMeter, flush_scalar_meters
 
 global writer
 
@@ -33,7 +33,7 @@ def adv_train(args,model,log,device,dataset,optimizer,train_meters,epoch,schedul
         #optimizer.step()
 
         with torch.no_grad():
-            #acc calculation
+            # Calculate accuracy
             adv_correct = torch.argmax(adv_pred.data,1) == y
             correct = torch.argmax(pred.data, 1) == y
             _, top_adv_correct = adv_pred.topk(5)
@@ -50,7 +50,6 @@ def adv_train(args,model,log,device,dataset,optimizer,train_meters,epoch,schedul
                 train_meters["top{}_adv_accuracy".format(k)].cache_list(adv_acc_list)
                 train_meters["top{}_accuracy".format(k)].cache_list(acc_list)
             scheduler.step() # for default lr scheduler
-            # log(model, loss.cpu(), correct.cpu(),scheduler.get_last_lr)
         if (batch_idx % 10) == 0:
             print(
                 "Epoch: [{}][{}/{}] \t Loss {:.3f}\t Adv_Loss {:.3f}\t Acc {:.3f}\t Adv_Acc {:.3f}\t".format(
@@ -71,14 +70,12 @@ def adv_adam_train(args,model,log,device,dataset,optimizer_sam,optimizer_adam,tr
         optimizer_adam.zero_grad()
         enable_running_stats(model)
         x_natural, y = (b.to(device) for b in batch)
-        loss, loss_natural,loss_robust,adv_pred,pred= AT_TRAIN_adamsam(model,device,args,x_natural,y,optimizer_sam,optimizer_adam)
+        _, loss_natural,loss_robust,adv_pred,pred= AT_TRAIN_adamsam(model,device,args,x_natural,y,optimizer_sam,optimizer_adam)
         train_meters["natural_loss"].cache((loss_natural).cpu().detach().numpy())
         train_meters["robust_loss"].cache((loss_robust).cpu().detach().numpy())
-        #loss.backward()
-        #optimizer.step()
 
         with torch.no_grad():
-            #acc calculation
+            # Calculate accuracy
             adv_correct = torch.argmax(adv_pred.data,1) == y
             correct = torch.argmax(pred.data, 1) == y
             _, top_adv_correct = adv_pred.topk(5)
@@ -94,8 +91,6 @@ def adv_adam_train(args,model,log,device,dataset,optimizer_sam,optimizer_adam,tr
                 acc_list = list(correct_k.cpu().detach().numpy())
                 train_meters["top{}_adv_accuracy".format(k)].cache_list(adv_acc_list)
                 train_meters["top{}_accuracy".format(k)].cache_list(acc_list)
-            #scheduler(epoch) # not using scheduler ..
-            # log(model, loss.cpu(), correct.cpu(),scheduler.get_last_lr)
         if (batch_idx % 10) == 0:
             print(
                 "Epoch: [{}][{}/{}] \t Loss {:.3f}\t Adv_Loss {:.3f}\t Acc {:.3f}\t Adv_Acc {:.3f}\t".format(
@@ -113,7 +108,7 @@ def train(args,model,log,device,dataset,optimizer,train_meters,epoch,scheduler):
     model.train()
     log.train(len_dataset=len(dataset.train))
 
-    for batch_idx, batch in enumerate(dataset.train):
+    for _, batch in enumerate(dataset.train):
         inputs, targets = (b.to(device) for b in batch)
 
         if args.sgd or args.adam:
@@ -125,7 +120,7 @@ def train(args,model,log,device,dataset,optimizer,train_meters,epoch,scheduler):
             loss.mean().backward()
             optimizer.step()
         else: # SAM
-            # first forward-backward step
+            # First forward-backward step
             enable_running_stats(model)
             predictions = model(inputs)
             loss = smooth_crossentropy(predictions, targets, smoothing=args.label_smoothing)
@@ -133,7 +128,7 @@ def train(args,model,log,device,dataset,optimizer,train_meters,epoch,scheduler):
             loss.mean().backward()
             optimizer.first_step(zero_grad=True)
 
-            # second forward-backward step
+            # Second forward-backward step
             disable_running_stats(model)
             smooth_crossentropy(model(inputs), targets, smoothing=args.label_smoothing).mean().backward()
             optimizer.second_step(zero_grad=True)
@@ -149,7 +144,6 @@ def train(args,model,log,device,dataset,optimizer,train_meters,epoch,scheduler):
                 train_meters["top{}_accuracy".format(k)].cache_list(acc_list)
             log(model, loss.cpu(), correct.cpu(), scheduler.get_last_lr())
             scheduler(epoch) # for default lr scheduler
-            #scheduler.step() # for cosineif (batch_idx % 10) == 0:
     results = flush_scalar_meters(train_meters)
     for k, v in results.items():
         if k != "best_val":
@@ -157,12 +151,11 @@ def train(args,model,log,device,dataset,optimizer,train_meters,epoch,scheduler):
     writer.add_scalar("train"+"/lr",scheduler.get_last_lr(),epoch)
 
 def val(model,log,dataset,val_meters,optimizer,scheduler,epoch):
-         # Single level optimization (SAM,ADAM,SGD)
     model.eval()
     log.eval(len_dataset=len(dataset.test))
 
     with torch.no_grad():
-        for batch_idx,batch in enumerate(dataset.test):
+        for _, batch in enumerate(dataset.test):
             inputs, targets = (b.to(device) for b in batch)
 
             predictions = model(inputs)
@@ -196,9 +189,9 @@ def adv_val(model,device,log,dataset,val_meters,optimizer,scheduler,epoch,beta):
             
             if args.ema:
                 with ema.average_parameters():
-                    loss, loss_natural,loss_robust,adv_pred,pred= AT_VAL(model,device,args,x_natural,y,optimizer,beta=beta)
+                    _, loss_natural,loss_robust,adv_pred,pred= AT_VAL(model,device,args,x_natural,y,optimizer,beta=beta)
             else:
-                    loss, loss_natural,loss_robust,adv_pred,pred= AT_VAL(model,device,args,x_natural,y,optimizer,beta=beta)
+                    _, loss_natural,loss_robust,adv_pred,pred= AT_VAL(model,device,args,x_natural,y,optimizer,beta=beta)
             val_meters["natural_loss"].cache((loss_natural).cpu().detach().numpy())
             val_meters["robust_loss"].cache((loss_robust).cpu().detach().numpy())
             with torch.no_grad():
@@ -267,8 +260,6 @@ if __name__ == "__main__":
     model = WideResNet(args.depth, args.width_factor, args.dropout, in_channels=3, labels=10).to(device)
     if args.ema:
         ema_model = ExponentialMovingAverage([p for p in model.parameters() if p.requires_grad],decay = args.ema_decay)
-        # ema_model.to(device)
-        # ema_model.eval()
         
     titles = []
     for arg in vars(args):
@@ -311,12 +302,7 @@ if __name__ == "__main__":
     if args.bilevel: #bilevel
         bilevel_optim = torch.optim.SGD(model.parameters(),lr=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
         bilevel_scheduler = StepLR(bilevel_optim,args.learning_rate,args.epochs)
-    #scheduler = StepLR(optimizer, args.learning_rate, args.epochs)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,args.epochs)
-    # test code (validation)
-    # model = torch.load("../test/checkpoint/epoch_139.pth")
-    # results = adv_val(model,device,log,dataset,val_meters,optimizer,scheduler,200,1)
-    # exit()
 
     for epoch in range(args.epochs):
         val_meters["best_val"].cache(best_val)

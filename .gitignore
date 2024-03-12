@@ -1,4 +1,13 @@
+# Dependencies
 Pipfile
 Pipfile.lock
 
-implementation/test/*
+# Runtimes
+__pycache__/
+
+# Dataset
+implementation/SAMAT/data/cifar-10-python.tar.gz
+implementation/SAMAT/data/cifar-10-batches-py
+
+# Logs
+test/
