@@ -20,13 +20,23 @@ from utility.meters import get_meters, ScalarMeter, flush_scalar_meters
 
 global writer
 
-def adv_train(args,model,log,device,dataset,optimizer,train_meters,epoch,scheduler,beta):
+def adv_train(
+        args,
+        model,
+        device,
+        dataset,
+        optimizer,
+        train_meters,
+        epoch,
+        scheduler,
+        beta
+    ) -> None:
     corrects = 0
     for batch_idx,batch in enumerate(dataset.train):
         optimizer.zero_grad()
         enable_running_stats(model)
         x_natural, y = (b.to(device) for b in batch)
-        loss, loss_natural,loss_robust,adv_pred,pred= AT_TRAIN(model,device,args,x_natural,y,optimizer,beta=beta)
+        _, loss_natural,loss_robust,adv_pred,pred= AT_TRAIN(model,device,args,x_natural,y,optimizer,beta=beta)
         train_meters["natural_loss"].cache((loss_natural).cpu().detach().numpy())
         train_meters["robust_loss"].cache((loss_robust).cpu().detach().numpy())
         #loss.backward()
@@ -63,7 +73,17 @@ def adv_train(args,model,log,device,dataset,optimizer,train_meters,epoch,schedul
             writer.add_scalar("train" + "/" + k, v, epoch)
     writer.add_scalar("train"+"/lr",scheduler.get_last_lr(),epoch)
 
-def adv_adam_train(args,model,log,device,dataset,optimizer_sam,optimizer_adam,train_meters,epoch,scheduler):
+def adv_adam_train(
+        args,
+        model,
+        device,
+        dataset,
+        optimizer_sam,
+        optimizer_adam,
+        train_meters,
+        epoch,
+        scheduler
+    ) -> None:
     corrects = 0
     for batch_idx,batch in enumerate(dataset.train):
         optimizer_sam.zero_grad()
@@ -104,7 +124,17 @@ def adv_adam_train(args,model,log,device,dataset,optimizer_sam,optimizer_adam,tr
             writer.add_scalar("train" + "/" + k, v, epoch)
     writer.add_scalar("train"+"/lr",scheduler.get_last_lr(),epoch)
 
-def train(args,model,log,device,dataset,optimizer,train_meters,epoch,scheduler):
+def train(
+        args,
+        model,
+        log,
+        device,
+        dataset,
+        optimizer,
+        train_meters,
+        epoch,
+        scheduler
+    ) -> None:
     model.train()
     log.train(len_dataset=len(dataset.train))
 
@@ -241,7 +271,6 @@ if __name__ == "__main__":
     parser.add_argument("--rho", default=2.0, type=int, help="Rho parameter for SAM.")
     parser.add_argument("--weight_decay", default=0.0005, type=float, help="L2 weight decay.")
     parser.add_argument("--width_factor", default=8, type=int, help="How many times wider compared to normal ResNet.")
-    parser.add_argument("--bilevel",action='store_true', help="use bilevel optimization to do SAM+AT. default is false")
     parser.add_argument("--trades",action="store_true",help="use trades")
     parser.add_argument("--sgd", action='store_true', help="use sgd.")
     parser.add_argument("--adam",action='store_true',help="use adam")
@@ -258,6 +287,7 @@ if __name__ == "__main__":
     dataset = Cifar(args.batch_size, args.threads)
     log = Log(log_each=10)
     model = WideResNet(args.depth, args.width_factor, args.dropout, in_channels=3, labels=10).to(device)
+
     if args.ema:
         ema_model = ExponentialMovingAverage([p for p in model.parameters() if p.requires_grad],decay = args.ema_decay)
         
@@ -285,30 +315,54 @@ if __name__ == "__main__":
     val_meters["best_val"] = ScalarMeter("best_val")
     best_val = 0.0
     base_optimizer = torch.optim.SGD
-    if args.sgd: # use sgd
-        optimizer = torch.optim.SGD(model.parameters(),lr=args.learning_rate,weight_decay=args.weight_decay,momentum=args.momentum)
-        print("using sgd")
+
+    used_optimzier = ''
+    if args.sgd: # Use SGD
+        used_optimizer = 'SGD'
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr = args.learning_rate,
+            weight_decay = args.weight_decay,
+            momentum = args.momentum
+        )
     elif args.adam: # ADAM
-        optimizer = torch.optim.Adam(model.parameters(),lr=args.learning_rate,weight_decay=args.weight_decay)
-        print("using adam")
+        used_optimizer = 'ADAM'
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr = args.learning_rate,
+            weight_decay = args.weight_decay
+        )
     elif args.adamsam: # A2GN
-        optimizer = SAM(model.parameters(), base_optimizer, rho=args.rho, adaptive=args.adaptive, lr=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
-        optimizer_adam = torch.optim.Adam(model.parameters(),lr=0.01)
-        print("using SAM & ADAM")
+        used_optimizer = 'A2GN'
+        optimizer = SAM(
+            model.parameters(), 
+            base_optimizer, 
+            rho=args.rho, 
+            adaptive=args.adaptive, 
+            lr=args.learning_rate, 
+            momentum=args.momentum, 
+            weight_decay=args.weight_decay
+        )
+        optimizer_adam = torch.optim.Adam(model.parameters(), lr=0.01)
     else: # SAM
-        optimizer = SAM(model.parameters(), base_optimizer, rho=args.rho, adaptive=args.adaptive, lr=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
-        print("using SAM")
-    
-    if args.bilevel: #bilevel
-        bilevel_optim = torch.optim.SGD(model.parameters(),lr=args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
-        bilevel_scheduler = StepLR(bilevel_optim,args.learning_rate,args.epochs)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,args.epochs)
+        used_optimizer = 'SAM'
+        optimizer = SAM(
+            model.parameters(), 
+            base_optimizer, 
+            rho=args.rho, 
+            adaptive=args.adaptive, 
+            lr=args.learning_rate, 
+            momentum=args.momentum, 
+            weight_decay=args.weight_decay
+        )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs)
+    print(f'using {used_optimizer}')
 
     for epoch in range(args.epochs):
         val_meters["best_val"].cache(best_val)
 
         if args.adamsam: #A2GN
-            adv_adam_train(args,model,log,device,dataset,optimizer,optimizer_adam,train_meters,epoch,scheduler)
+            adv_adam_train(args,model,device,dataset,optimizer,optimizer_adam,train_meters,epoch,scheduler)
             if args.ema:
                 ema_model.update()
                 ema = [ema_model,model]
@@ -320,7 +374,7 @@ if __name__ == "__main__":
                     torch.save(ema_model.state_dict() if args.ema else model, os.path.join(log_prefix,"checkpoint", "best.pth"))
 
         else: # SAMAT or TRADESAM - requires option
-            adv_train(args,model,log,device,dataset,optimizer,train_meters,epoch,scheduler,beta=args.beta)
+            adv_train(args,model,device,dataset,optimizer,train_meters,epoch,scheduler,beta=args.beta)
             if args.ema:
                 ema_model.update_parameters(model)
                 results = adv_val(ema_model,device,log,dataset,val_meters,optimizer,scheduler,epoch,beta = args.beta)
